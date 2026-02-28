@@ -11,6 +11,21 @@ const IMAGE_HTTP_HOST_NT = "https://multimedia.nt.qq.com.cn";
 class ImgDownloader {
   constructor() {
     this.rkeyManager = new RkeyManager("https://llob.linyuchen.net/rkey");
+    this.saveDir = "";
+    this.maxFileSizeMB = 50;
+    this.db = null;
+    this.accountId = "";
+  }
+
+  /**
+   * Configure the downloader for immediate file saving.
+   * @param {object} options - { saveDir, maxFileSizeMB, db, accountId }
+   */
+  configure(options) {
+    if (options.saveDir) this.saveDir = options.saveDir;
+    if (options.maxFileSizeMB != null) this.maxFileSizeMB = options.maxFileSizeMB;
+    if (options.db) this.db = options.db;
+    if (options.accountId) this.accountId = options.accountId;
   }
 
   async getImageUrl(element) {
@@ -44,27 +59,117 @@ class ImgDownloader {
     return "";
   }
 
+  /**
+   * Save media files (images/videos/files) immediately upon receiving a message.
+   * Copies local files to plugin data directory and records them in the database.
+   * @param {object} msgItem - The message object
+   * @param {string} msgId - The message ID
+   */
+  async saveMediaFiles(msgItem, msgId) {
+    if (!Array.isArray(msgItem?.elements) || !this.saveDir) return;
+
+    const maxBytes = (this.maxFileSizeMB || 50) * 1024 * 1024;
+
+    for (let el of msgItem.elements) {
+      try {
+        // Images
+        if (el?.picElement) {
+          const pic = el.picElement;
+          const sourcePath = pic.sourcePath;
+          if (sourcePath && fs.existsSync(sourcePath)) {
+            let fileSize = 0;
+            try { fileSize = fs.statSync(sourcePath).size; } catch (e) { this.output("Cannot stat file:", sourcePath, e.message); }
+            if (fileSize > 0 && fileSize <= maxBytes) {
+              const destDir = path.join(this.saveDir, "images");
+              if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+              const destPath = path.join(destDir, path.basename(sourcePath));
+              try {
+                if (!fs.existsSync(destPath)) {
+                  fs.copyFileSync(sourcePath, destPath);
+                }
+              } catch (e) { this.output("Copy file error:", e.message); }
+              if (this.db) {
+                this.db.insertFile(
+                  msgId, this.accountId, el.elementId || "",
+                  "image", pic.fileName || path.basename(sourcePath),
+                  fileSize, sourcePath, destPath
+                );
+              }
+            }
+          }
+        }
+
+        // Videos
+        if (el?.videoElement) {
+          const video = el.videoElement;
+          const sourcePath = video.filePath;
+          if (sourcePath && fs.existsSync(sourcePath)) {
+            let fileSize = 0;
+            try { fileSize = fs.statSync(sourcePath).size; } catch (e) { this.output("Cannot stat file:", sourcePath, e.message); }
+            if (fileSize > 0 && fileSize <= maxBytes) {
+              const destDir = path.join(this.saveDir, "videos");
+              if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+              const destPath = path.join(destDir, path.basename(sourcePath));
+              try {
+                if (!fs.existsSync(destPath)) {
+                  fs.copyFileSync(sourcePath, destPath);
+                }
+              } catch (e) { this.output("Copy file error:", e.message); }
+              if (this.db) {
+                this.db.insertFile(
+                  msgId, this.accountId, el.elementId || "",
+                  "video", video.fileName || path.basename(sourcePath),
+                  fileSize, sourcePath, destPath
+                );
+              }
+            }
+          }
+        }
+
+        // Files
+        if (el?.fileElement) {
+          const file = el.fileElement;
+          const sourcePath = file.filePath;
+          if (sourcePath && fs.existsSync(sourcePath)) {
+            let fileSize = 0;
+            try { fileSize = fs.statSync(sourcePath).size; } catch (e) { this.output("Cannot stat file:", sourcePath, e.message); }
+            if (fileSize > 0 && fileSize <= maxBytes) {
+              const destDir = path.join(this.saveDir, "files");
+              if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+              const destPath = path.join(destDir, path.basename(sourcePath));
+              try {
+                if (!fs.existsSync(destPath)) {
+                  fs.copyFileSync(sourcePath, destPath);
+                }
+              } catch (e) { this.output("Copy file error:", e.message); }
+              if (this.db) {
+                this.db.insertFile(
+                  msgId, this.accountId, el.elementId || "",
+                  "file", file.fileName || path.basename(sourcePath),
+                  fileSize, sourcePath, destPath
+                );
+              }
+            }
+          }
+        }
+      } catch (e) {
+        this.output("Save media file error:", e.message);
+      }
+    }
+  }
+
   // 下载被撤回的图片（抄自Lite-Tools）
   async downloadPic(msgItem) {
-    if (!Array.isArray(msgItem?.elements)){
+    if (!Array.isArray(msgItem?.elements)) {
       return;
     }
-    for (let el of msgItem.elements){
+    for (let el of msgItem.elements) {
       if (el?.picElement) {
         const pic = el.picElement;
         const thumbMap = new Map([
-          [
-            0,
-            pic.sourcePath,
-          ],
-          [
-            198,
-            pic.sourcePath,
-          ],
-          [
-            720,
-            pic.sourcePath,
-          ],
+          [0, pic.sourcePath],
+          [198, pic.sourcePath],
+          [720, pic.sourcePath],
         ]);
         const picUrl = await this.getImageUrl(el.picElement);
         this.output(
@@ -76,31 +181,26 @@ class ImgDownloader {
           pic.sourcePath
         );
         let pictureRequireDownload = false;
-        try{
-          pictureRequireDownload = statSync(pic.sourcePath).size <= 100;//错误的图片
-        }catch (e) {
-
-        }
+        try {
+          pictureRequireDownload = fs.statSync(pic.sourcePath).size <= 100; //错误的图片
+        } catch (_) {}
         if (!fs.existsSync(pic.sourcePath) || pictureRequireDownload) {
           this.output("Download pic:", `${picUrl}`, " to ", pic.sourcePath);
-          const body = await this.request(`${picUrl}`);
           try {
-            JSON.parse(body);
-            this.output('Picture already expired.', picUrl, pic.sourcePath);//过期
+            const body = await this.request(`${picUrl}`);
+            try {
+              JSON.parse(body);
+              this.output("Picture already expired.", picUrl, pic.sourcePath); //过期
+            } catch (_) {
+              fs.mkdirSync(path.dirname(pic.sourcePath), { recursive: true });
+              fs.writeFileSync(pic.sourcePath, body);
+            }
           } catch (e) {
-            fs.mkdirSync(path.dirname(pic.sourcePath), { recursive: true });
-            fs.writeFileSync(pic.sourcePath, body);
+            this.output("Download pic failed:", e.message);
           }
         } else {
           this.output("Pic already existed, skip.", pic.sourcePath);
         }
-        //需要复制原图到预览图目录
-        // thumbMap.forEach(async (el, key) => {
-        //   if (!fs.existsSync(el)) {
-        //     this.output("Copy thumbs:", `source: ${pic.sourcePath} to ${el}`);
-        //     fs.copyFile(pic.sourcePath, el);
-        //   }
-        // });
 
         // 修复本地数据中的错误
         if (

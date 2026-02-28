@@ -1,5 +1,5 @@
 {
   "dependencies": {
-    "level-party": "^5.1.1"
+    "better-sqlite3": "^11.0.0"
   }
 }

@@ -1,0 +1,38 @@
+name: Build Plugin
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install production dependencies
+        run: npm install --omit=dev
+
+      - name: Package plugin
+        run: |
+          mkdir -p dist/anti_recall
+          rsync -a --exclude='.git' --exclude='.github' --exclude='dist' \
+            --exclude='*.db' --exclude='*.db-journal' --exclude='*.db-wal' --exclude='*.db-shm' \
+            . dist/anti_recall/
+          cd dist
+          zip -r ../qq-anti-recall.zip anti_recall
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qq-anti-recall
+          path: qq-anti-recall.zip
