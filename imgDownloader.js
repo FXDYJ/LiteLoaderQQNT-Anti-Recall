@@ -78,14 +78,16 @@ class ImgDownloader {
           const sourcePath = pic.sourcePath;
           if (sourcePath && fs.existsSync(sourcePath)) {
             let fileSize = 0;
-            try { fileSize = fs.statSync(sourcePath).size; } catch (_) {}
+            try { fileSize = fs.statSync(sourcePath).size; } catch (e) { this.output("Cannot stat file:", sourcePath, e.message); }
             if (fileSize > 0 && fileSize <= maxBytes) {
               const destDir = path.join(this.saveDir, "images");
               if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
               const destPath = path.join(destDir, path.basename(sourcePath));
-              if (!fs.existsSync(destPath)) {
-                fs.copyFileSync(sourcePath, destPath);
-              }
+              try {
+                if (!fs.existsSync(destPath)) {
+                  fs.copyFileSync(sourcePath, destPath);
+                }
+              } catch (e) { this.output("Copy file error:", e.message); }
               if (this.db) {
                 this.db.insertFile(
                   msgId, this.accountId, el.elementId || "",
@@ -103,14 +105,16 @@ class ImgDownloader {
           const sourcePath = video.filePath;
           if (sourcePath && fs.existsSync(sourcePath)) {
             let fileSize = 0;
-            try { fileSize = fs.statSync(sourcePath).size; } catch (_) {}
+            try { fileSize = fs.statSync(sourcePath).size; } catch (e) { this.output("Cannot stat file:", sourcePath, e.message); }
             if (fileSize > 0 && fileSize <= maxBytes) {
               const destDir = path.join(this.saveDir, "videos");
               if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
               const destPath = path.join(destDir, path.basename(sourcePath));
-              if (!fs.existsSync(destPath)) {
-                fs.copyFileSync(sourcePath, destPath);
-              }
+              try {
+                if (!fs.existsSync(destPath)) {
+                  fs.copyFileSync(sourcePath, destPath);
+                }
+              } catch (e) { this.output("Copy file error:", e.message); }
               if (this.db) {
                 this.db.insertFile(
                   msgId, this.accountId, el.elementId || "",
@@ -128,14 +132,16 @@ class ImgDownloader {
           const sourcePath = file.filePath;
           if (sourcePath && fs.existsSync(sourcePath)) {
             let fileSize = 0;
-            try { fileSize = fs.statSync(sourcePath).size; } catch (_) {}
+            try { fileSize = fs.statSync(sourcePath).size; } catch (e) { this.output("Cannot stat file:", sourcePath, e.message); }
             if (fileSize > 0 && fileSize <= maxBytes) {
               const destDir = path.join(this.saveDir, "files");
               if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
               const destPath = path.join(destDir, path.basename(sourcePath));
-              if (!fs.existsSync(destPath)) {
-                fs.copyFileSync(sourcePath, destPath);
-              }
+              try {
+                if (!fs.existsSync(destPath)) {
+                  fs.copyFileSync(sourcePath, destPath);
+                }
+              } catch (e) { this.output("Copy file error:", e.message); }
               if (this.db) {
                 this.db.insertFile(
                   msgId, this.accountId, el.elementId || "",

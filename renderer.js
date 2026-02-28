@@ -342,35 +342,35 @@ export async function onSettingWindowCreated(view) {
 
   node.querySelector("#maxMsgLimit").onblur = async () => {
     var limit = parseInt(node.querySelector("#maxMsgLimit").value, 10);
-    if (!limit || limit <= 0 || limit > 99999999) { alert("数量输入有误，请重新输入"); return; }
+    if (isNaN(limit) || limit <= 0 || limit > 99999999) { alert("数量输入有误，请重新输入"); return; }
     nowConfig.maxMsgSaveLimit = limit;
     await window.anti_recall.saveConfig(nowConfig);
   };
 
   node.querySelector("#deletePerTime").onblur = async () => {
     var limit = parseInt(node.querySelector("#deletePerTime").value, 10);
-    if (!limit || limit <= 0 || limit > 99999) { alert("数量输入有误，请重新输入"); return; }
+    if (isNaN(limit) || limit <= 0 || limit > 99999) { alert("数量输入有误，请重新输入"); return; }
     nowConfig.deleteMsgCountPerTime = limit;
     await window.anti_recall.saveConfig(nowConfig);
   };
 
   node.querySelector("#maxFileSizeMB").onblur = async () => {
     var limit = parseInt(node.querySelector("#maxFileSizeMB").value, 10);
-    if (!limit || limit <= 0 || limit > 1024) { alert("大小输入有误，请重新输入"); return; }
+    if (isNaN(limit) || limit <= 0 || limit > 1024) { alert("大小输入有误，请重新输入"); return; }
     nowConfig.maxFileSaveSizeMB = limit;
     await window.anti_recall.saveConfig(nowConfig);
   };
 
   node.querySelector("#maxFileSaveLimit").onblur = async () => {
     var limit = parseInt(node.querySelector("#maxFileSaveLimit").value, 10);
-    if (!limit || limit <= 0 || limit > 999999) { alert("数量输入有误，请重新输入"); return; }
+    if (isNaN(limit) || limit <= 0 || limit > 999999) { alert("数量输入有误，请重新输入"); return; }
     nowConfig.maxFileSaveLimit = limit;
     await window.anti_recall.saveConfig(nowConfig);
   };
 
   node.querySelector("#deleteFilePerTime").onblur = async () => {
     var limit = parseInt(node.querySelector("#deleteFilePerTime").value, 10);
-    if (!limit || limit <= 0 || limit > 99999) { alert("数量输入有误，请重新输入"); return; }
+    if (isNaN(limit) || limit <= 0 || limit > 99999) { alert("数量输入有误，请重新输入"); return; }
     nowConfig.deleteFileCountPerTime = limit;
     await window.anti_recall.saveConfig(nowConfig);
   };

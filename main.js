@@ -10,6 +10,10 @@ var pluginDataDir = path.join(LiteLoader.path.data, "anti_recall");
 const imgDownloader = new ImgDownloader();
 var db = null;
 var myUid = "";
+var cleanupCounter = 0;
+const CLEANUP_INTERVAL = 100; // Only check cleanup every N messages
+
+const EMPTY_STATS = { totalMessages: 0, totalRecalled: 0, totalFiles: 0, totalFileSize: 0, dbSize: 0 };
 
 var sampleConfig = {
   mainColor: "#ff6d6d",
@@ -140,12 +144,12 @@ async function onLoad() {
   });
 
   ipcMain.handle("LiteLoader.anti_recall.getStats", async () => {
-    if (!db) return { totalMessages: 0, totalRecalled: 0, totalFiles: 0, totalFileSize: 0, dbSize: 0 };
+    if (!db) return EMPTY_STATS;
     return db.getStats(myUid || "");
   });
 
   ipcMain.handle("LiteLoader.anti_recall.getDetailedStats", async () => {
-    if (!db) return { totalMessages: 0, totalRecalled: 0, totalFiles: 0, totalFileSize: 0, dbSize: 0 };
+    if (!db) return EMPTY_STATS;
     return db.getDetailedStats(myUid || "");
   });
 
@@ -463,14 +467,18 @@ function onBrowserWindowCreated(window) {
                     }
                   }
 
-                  // Clean up old messages periodically
+                  // Clean up old messages periodically (throttled)
                   if (db && nowConfig.saveDb) {
-                    const stats = db.getStats(myUid || "");
-                    if (stats.totalMessages > (nowConfig.maxMsgSaveLimit || 50000)) {
-                      db.cleanOldMessages(myUid || "", nowConfig.maxMsgSaveLimit - (nowConfig.deleteMsgCountPerTime || 2000));
-                    }
-                    if (nowConfig.saveMediaImmediately && stats.totalFiles > (nowConfig.maxFileSaveLimit || 5000)) {
-                      db.cleanOldFiles(myUid || "", nowConfig.maxFileSaveLimit - (nowConfig.deleteFileCountPerTime || 500));
+                    cleanupCounter++;
+                    if (cleanupCounter >= CLEANUP_INTERVAL) {
+                      cleanupCounter = 0;
+                      const stats = db.getStats(myUid || "");
+                      if (stats.totalMessages > (nowConfig.maxMsgSaveLimit || 50000)) {
+                        db.cleanOldMessages(myUid || "", nowConfig.maxMsgSaveLimit - (nowConfig.deleteMsgCountPerTime || 2000));
+                      }
+                      if (nowConfig.saveMediaImmediately && stats.totalFiles > (nowConfig.maxFileSaveLimit || 5000)) {
+                        db.cleanOldFiles(myUid || "", nowConfig.maxFileSaveLimit - (nowConfig.deleteFileCountPerTime || 500));
+                      }
                     }
                   }
                 }
