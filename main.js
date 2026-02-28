@@ -2,22 +2,28 @@ const fs = require("fs");
 const path = require("path");
 const { app, ipcMain, dialog } = require("electron");
 const { ImgDownloader } = require("./imgDownloader.js");
+const { Database } = require("./database.js");
 
 var configFilePath = "";
 var pluginDataDir = path.join(LiteLoader.path.data, "anti_recall");
 
 const imgDownloader = new ImgDownloader();
-const Level = require("level-party");
 var db = null;
+var myUid = "";
 
 var sampleConfig = {
   mainColor: "#ff6d6d",
-  saveDb: false,
+  saveDb: true,
   enableShadow: true,
   enableTip: true,
   isAntiRecallSelfMsg: false,
-  maxMsgSaveLimit: 10000,
-  deleteMsgCountPerTime: 500,
+  maxMsgSaveLimit: 50000,
+  deleteMsgCountPerTime: 2000,
+  maxFileSaveSizeMB: 50,
+  maxFileSaveLimit: 5000,
+  deleteFileCountPerTime: 500,
+  saveMediaImmediately: true,
+  showRecaller: true,
 };
 
 var nowConfig = {};
@@ -33,10 +39,21 @@ function initConfig() {
 function loadConfig() {
   if (!fs.existsSync(configFilePath)) {
     initConfig();
-    return sampleConfig;
+    return { ...sampleConfig };
   } else {
-    return JSON.parse(fs.readFileSync(configFilePath, "utf-8"));
+    try {
+      const loaded = JSON.parse(fs.readFileSync(configFilePath, "utf-8"));
+      // Merge with defaults for any missing keys
+      return { ...sampleConfig, ...loaded };
+    } catch (e) {
+      output("Config parse error, using defaults:", e.message);
+      return { ...sampleConfig };
+    }
   }
+}
+
+function saveConfig() {
+  fs.writeFileSync(configFilePath, JSON.stringify(nowConfig, null, 2), "utf-8");
 }
 
 onLoad();
@@ -47,17 +64,33 @@ async function onLoad() {
   }
   configFilePath = path.join(pluginDataDir, "config.json");
   nowConfig = loadConfig();
+  saveConfig();
 
-  if (nowConfig.mainColor == null) {
-    nowConfig.mainColor = "#ff6d6d";
+  // Initialize SQLite database
+  if (nowConfig.saveDb) {
+    try {
+      db = new Database(pluginDataDir);
+      db.open();
+      output("SQLite database opened successfully.");
+    } catch (e) {
+      output("Failed to open database:", e.message);
+      db = null;
+    }
   }
-  if (nowConfig.enableShadow == null) {
-    nowConfig.enableShadow = true;
+
+  // Configure image downloader for immediate file saving
+  const mediaSaveDir = path.join(pluginDataDir, "media");
+  if (!fs.existsSync(mediaSaveDir)) {
+    fs.mkdirSync(mediaSaveDir, { recursive: true });
   }
-  if (nowConfig.enableTip == null) {
-    nowConfig.enableTip = true;
-  }
-  fs.writeFileSync(configFilePath, JSON.stringify(nowConfig, null, 2), "utf-8");
+  imgDownloader.configure({
+    saveDir: mediaSaveDir,
+    maxFileSizeMB: nowConfig.maxFileSaveSizeMB,
+    db: db,
+    accountId: myUid,
+  });
+
+  // ---- IPC Handlers ----
 
   ipcMain.handle(
     "LiteLoader.anti_recall.getNowConfig",
@@ -67,111 +100,123 @@ async function onLoad() {
   );
 
   ipcMain.handle("LiteLoader.anti_recall.saveConfig", async (event, config) => {
-    nowConfig = config;
+    nowConfig = { ...sampleConfig, ...config };
     sendChatWindowsMessage("LiteLoader.anti_recall.mainWindow.repatchCss");
-    fs.writeFileSync(configFilePath, JSON.stringify(config, null, 2), "utf-8");
+    saveConfig();
+
+    // Update downloader config
+    imgDownloader.configure({
+      maxFileSizeMB: nowConfig.maxFileSaveSizeMB,
+      db: db,
+      accountId: myUid,
+    });
   });
 
-  if (nowConfig.saveDb) {
-    db = Level(path.join(pluginDataDir, "qq-recalled-db"), {
-      valueEncoding: "json",
-    });
-
-    db.open((e) => {
-      if (e !== undefined && e !== null) {
-        // app.whenReady().then(() => {
-        //   dialog
-        //     .showMessageBox({
-        //       type: "warning",
-        //       title: "警告",
-        //       message:
-        //         "打开反撤回数据库失败，可能是上次QQ进程未完全退出。建议关闭QQ并彻底结束QQ进程，再重启QQ，否则反撤回消息无法正常保存（即使反撤回仍生效，只是重启QQ后会丢失）。",
-        //       buttons: ["继续打开QQ", "关闭QQ"],
-        //     })
-        //     .then((r) => {
-        //       if (r.response == 1) {
-        //         app.exit();
-        //       }
-        //     });
-        // });
-        output(
-          "打开数据库失败，可能是QQ进程未完全退出。请查看下面详细错误信息中的cause部分：",
-          e
-        );
-      }
-    });
-  }
   ipcMain.handle("LiteLoader.anti_recall.clearDb", async (event, message) => {
-    dialog
-      .showMessageBox({
-        type: "warning",
-        title: "警告",
-        message: "清空所有已储存的撤回消息后不可恢复，是否确认清空？",
-        buttons: ["确定", "取消"],
-        cancelId: 1,
-      })
-      .then(async (idx) => {
-        //第一个按钮
-        if (idx.response == 0) {
-          await db.clear();
-          dialog.showMessageBox({
-            type: "info",
-            title: "提示",
-            message:
-              "清空完毕，之前保存的所有已撤回消息均被删除，重启QQ后就能看见效果。",
-            buttons: ["确定"],
-          });
-        }
-      });
+    return new Promise((resolve) => {
+      dialog
+        .showMessageBox({
+          type: "warning",
+          title: "警告",
+          message: "清空所有已储存的撤回消息后不可恢复，是否确认清空？",
+          buttons: ["确定", "取消"],
+          cancelId: 1,
+        })
+        .then(async (idx) => {
+          if (idx.response == 0) {
+            if (db) {
+              db.clearAll(myUid || "");
+            }
+            dialog.showMessageBox({
+              type: "info",
+              title: "提示",
+              message: "清空完毕，之前保存的所有已撤回消息均被删除。",
+              buttons: ["确定"],
+            });
+          }
+          resolve();
+        });
+    });
+  });
+
+  ipcMain.handle("LiteLoader.anti_recall.getStats", async () => {
+    if (!db) return { totalMessages: 0, totalRecalled: 0, totalFiles: 0, totalFileSize: 0, dbSize: 0 };
+    return db.getStats(myUid || "");
+  });
+
+  ipcMain.handle("LiteLoader.anti_recall.getDetailedStats", async () => {
+    if (!db) return { totalMessages: 0, totalRecalled: 0, totalFiles: 0, totalFileSize: 0, dbSize: 0 };
+    return db.getDetailedStats(myUid || "");
+  });
+
+  ipcMain.handle("LiteLoader.anti_recall.getRecalledByPeer", async (event, peerUid, limit, offset) => {
+    if (!db) return [];
+    return db.getRecalledByPeer(peerUid, myUid || "", limit || 50, offset || 0);
+  });
+
+  ipcMain.handle("LiteLoader.anti_recall.searchRecalled", async (event, keyword, limit, offset) => {
+    if (!db) return [];
+    return db.searchRecalled(myUid || "", keyword, limit || 50, offset || 0);
+  });
+
+  ipcMain.handle("LiteLoader.anti_recall.getAllRecalled", async (event, limit, offset) => {
+    if (!db) return [];
+    return db.getAllRecalled(myUid || "", limit || 50, offset || 0);
+  });
+
+  ipcMain.handle("LiteLoader.anti_recall.getPeersWithRecalls", async () => {
+    if (!db) return [];
+    return db.getPeersWithRecalls(myUid || "");
   });
 
   app.on("quit", async () => {
     output("Closing db...");
-    await db.close();
+    if (db) {
+      db.close();
+    }
   });
 }
 
-var msgFlow = [];
-var recalledMsg = [];
-
-function insertDb(msg) {
-  if (db != null) {
-    db.get(msg.id, (error, value) => {
-      if (error.status == 404) {
-        db.put(msg.id, msg, (err) => {
-          if (err) throw err;
-        });
-      } else {
-        if (error) throw error;
-      }
-    });
-  }
-}
-
-async function getMsgById(id) {
-  if (db != null) {
-    try {
-      return await db.get(id);
-    } catch (e) {
-      if (e.status != 404) {
-        output(e);
-      }
-      return null;
-    }
-  } else {
-    output("Warning: Db is null, no previous msg available.");
-  }
-  return null;
-}
-
-function sendChatWindowsMessage(message) {
+function sendChatWindowsMessage(message, ...args) {
   for (var window of mainWindowObjs) {
     if (window.isDestroyed()) continue;
-    window.webContents.send(message);
+    window.webContents.send(message, ...args);
   }
 }
 
 var mainWindowObjs = [];
+
+/**
+ * Extract recaller information from a revokeElement.
+ * @returns {{ uid: string, name: string }}
+ */
+function extractRecallerInfo(revokeElement) {
+  let uid = "";
+  let name = "";
+  if (!revokeElement) return { uid, name };
+
+  // Try to get recaller from wording list (group recall by admin)
+  if (Array.isArray(revokeElement.wording)) {
+    for (const w of revokeElement.wording) {
+      if (w && w.userUid) {
+        uid = w.userUid;
+        name = w.userNick || w.userName || "";
+        break;
+      }
+    }
+  }
+  // Fallback to operator info
+  if (!uid && revokeElement.operatorUid) {
+    uid = revokeElement.operatorUid;
+    name = revokeElement.operatorNick || "";
+  }
+  // Fallback: try origMsgSenderUid
+  if (!uid && revokeElement.origMsgSenderUid) {
+    uid = revokeElement.origMsgSenderUid;
+  }
+  return { uid, name };
+}
+
 function onBrowserWindowCreated(window) {
   window.webContents.on("did-stop-loading", () => {
     //只针对主界面和独立聊天界面生效
@@ -180,50 +225,16 @@ function onBrowserWindowCreated(window) {
       window.webContents.getURL().indexOf("#/chat") != -1
     ) {
       mainWindowObjs.push(window);
-      // const proxyEvents = new Proxy(
-      //     window.webContents._events["-ipc-message"],
-      //     {
-      //         // 拦截函数调用
-      //         apply(target, thisArg, argumentsList) {
-      //             if (
-      //                 argumentsList[3][0]["eventName"] &&
-      //                 !argumentsList[3][0]["eventName"].includes(
-      //                     "ns-Logger"
-      //                 )
-      //             ) {
-      //                 output(JSON.stringify(argumentsList));
-      //             }
-      //             return target.apply(thisArg, argumentsList);
-      //         }
-      //     }
-      // );
-      // window.webContents._events["-ipc-message"] = proxyEvents;
-
-      //补充知识：
-      //撤回的原理是，你先发了一条消息，这条消息有一个msgId，然后又撤回了他，那腾讯就会发一条一样msgId的撤回消息包来替换，这样你以后拉取的话，这个msgId只会对应一条撤回提示了；
-      //本插件的原理是，先在内存中临时储存所有消息（1000条上限），然后如果有撤回发生，则将撤回的提示替换为之前保存的消息。
 
       const original_send =
         (window.webContents.__qqntim_original_object &&
           window.webContents.__qqntim_original_object.send) ||
         window.webContents.send;
 
-      //var myUid = "";
       const patched_send = async function (channel, ...args) {
-        // output(channel, JSON.stringify(args));
-        // if (db != null) {
-        //     db.put("a", { x: 123 }, function (err) {
-        //         if (err) throw err;
-
-        //         db.get("a", function (err, value) {
-        //             console.log(value); // { x: 123 }
-        //         });
-        //     });
-        // }
-
         try {
           if (args.length >= 2) {
-            //MessageList IPC 中能看到消息全量更新内容，其中包含撤回的提示，但并不包含被撤回的消息（被撤回的已经被替换掉了），需要替换撤回提示为之前保存的消息内容
+            //MessageList IPC 中能看到消息全量更新内容
             if (
               args.some(
                 (item) =>
@@ -235,145 +246,109 @@ function onBrowserWindowCreated(window) {
               )
             ) {
               var currentMsgPeer = "";
-
-              //撤回提示所在的msgList下标数组，在后面需要一个个替换为真实的消息
               var needUpdateIdx = [];
+
               for (let idx in args[1].msgList) {
-                var item = args[1].msgList[idx];
+                let item = args[1].msgList[idx];
                 currentMsgPeer = item.peerUid;
                 if (item.msgType == 5 && item.subMsgType == 4) {
                   if (
                     item.elements[0].grayTipElement != null &&
                     item.elements[0].grayTipElement.revokeElement != null &&
                     (nowConfig.isAntiRecallSelfMsg ||
-                      !item.elements[0].grayTipElement.revokeElement
-                        .isSelfOperate)
+                      !item.elements[0].grayTipElement.revokeElement.isSelfOperate)
                   ) {
                     needUpdateIdx.push(idx);
                   }
                 }
-                // console.log(
-                //     item.recallTime,
-                //     "<====>",
-                //     item.elements,
-                //     "<====>",
-                //     item.elements[0].grayTipElement.revokeElement
-                // );
               }
 
               needUpdateIdx.sort((a, b) => b - a);
 
-              for (var i of needUpdateIdx) {
+              for (let i of needUpdateIdx) {
                 let recallTipMsg = args[1].msgList[i];
-                var currMsgId = recallTipMsg.msgId;
+                let currMsgId = recallTipMsg.msgId;
 
-                //如果之前存了消息
-                let olderMsg = msgFlow.find((i) => i.id == currMsgId);
-                let olderMsgFromRecalledMsg = recalledMsg.find(
-                  (i) => i.id == currMsgId
-                );
+                // Try to get message from database
+                let dbMsg = db ? db.getMessage(currMsgId, myUid || "") : null;
 
-                var dbMsg = await getMsgById(currMsgId);
-                let fromName;
-                let originalMsg;
+                let originalMsg = null;
+                let fromName = "";
+                let recallerInfo = { uid: "", name: "" };
 
-                //优先从已保存的撤回的消息中获取
-                if (olderMsgFromRecalledMsg != null) {
-                  // original_send.call(
-                  //     window.webContents,
-                  //     channel,
-                  //     {
-                  //         type: "request",
-                  //         eventName: "ns-ntApi-2"
-                  //     },
-                  //     [
-                  //         {
-                  //             cmdName:
-                  //                 "nodeIKernelMsgListener/onRecvMsg",
-                  //             cmdType: "event",
-                  //             payload: {
-                  //                 msgList: [
-                  //                     olderMsgFromRecalledMsg.msg
-                  //                 ]
-                  //             }
-                  //         }
-                  //     ]
-                  // );
-                  originalMsg =olderMsgFromRecalledMsg;
-                  fromName = "old msg";
-                }
-                //如果没有存过，则说明他在消息流里
-                else if (olderMsg != null) {
-                  //没专门存过这条消息到专门的反撤回数组中，就存一下
-                  if (olderMsgFromRecalledMsg == null) {
-                    recalledMsg.push(olderMsg);
-                  }
-
-                  originalMsg = olderMsg;
-                  fromName = "msgFlow";
-                } else if (dbMsg != null) {
-                  //没专门存过这条消息到专门的反撤回数组中，就存一下
-                  if (olderMsgFromRecalledMsg == null) {
-                    recalledMsg.push(dbMsg);
-                  }
-
-                  originalMsg = dbMsg;
-                  fromName = "dbMsg";
+                // Extract recaller info
+                const revokeEl = recallTipMsg.elements[0]?.grayTipElement?.revokeElement;
+                if (revokeEl) {
+                  recallerInfo = extractRecallerInfo(revokeEl);
                 }
 
-                if (originalMsg !== undefined) {
-                  if (originalMsg.msg instanceof Object) {
-                    let msg = Object.assign({}, originalMsg.msg);//克隆
+                if (dbMsg != null) {
+                  originalMsg = dbMsg.msg_data;
+                  fromName = "database";
 
-                    msg.isOnlineMsg = true;
-                    await imgDownloader.downloadPic(msg);
-                    output(
-                      "Detected recall, intercepted and recovered from " + fromName
-                    );
+                  // Mark as recalled if not already
+                  if (db && !dbMsg.is_recalled) {
+                    db.markRecalled(currMsgId, myUid || "", recallerInfo.uid, recallerInfo.name);
+                  }
+                }
 
-                    //解决 某些情况（可能是新版本在群聊中的情况） 不显示消息
-                    //方法：撤回提示消息中一些对象存在一些特殊属性，保留这些特殊属性
-                    //因为原来使用JSON.stringify解析对象，无法解析特殊属性
-                    for (let key in msg) {
-                      if (
-                        [
-                          'msgSeq',//保持序列
-                          'cntSeq',//保持序列
-                          'clientSeq',//保持序列
-                          'sendStatus',//防止消息一直在加载
-                          'emojiLikesList',//表情回应，撤回消息提示中会包含（原本的真实消息貌似不会包含）
-                        ].includes(key)
-                      ) {
-                        continue;
-                      }
-                      let newValue = msg[key];
-                      let oldValue = recallTipMsg[key];
-                      let value = newValue;
-                      if (
-                        ["msgAttrs", "msgMeta", "generalFlags"].includes(key) &&
-                        newValue instanceof Object &&
-                        oldValue instanceof Object
-                      ) {
-                        for (let key in oldValue) {//删除所有OwnProperty
-                          if (oldValue.hasOwnProperty(key)) {
-                            delete oldValue[key];
-                          }
-                        }
-                        value = Object.assign(oldValue, newValue);//合并
-                      }
-                      recallTipMsg[key] = value;
+                if (originalMsg != null && originalMsg instanceof Object) {
+                  let msg = Object.assign({}, originalMsg);
+                  msg.isOnlineMsg = true;
+                  await imgDownloader.downloadPic(msg);
+                  output("Detected recall, intercepted and recovered from " + fromName);
+
+                  for (let key in msg) {
+                    if (
+                      ["msgSeq", "cntSeq", "clientSeq", "sendStatus", "emojiLikesList"].includes(key)
+                    ) {
+                      continue;
                     }
+                    let newValue = msg[key];
+                    let oldValue = recallTipMsg[key];
+                    let value = newValue;
+                    if (
+                      ["msgAttrs", "msgMeta", "generalFlags"].includes(key) &&
+                      newValue instanceof Object &&
+                      oldValue instanceof Object
+                    ) {
+                      for (let k in oldValue) {
+                        if (oldValue.hasOwnProperty(k)) {
+                          delete oldValue[k];
+                        }
+                      }
+                      value = Object.assign(oldValue, newValue);
+                    }
+                    recallTipMsg[key] = value;
                   }
                 }
+              }
+
+              // Send recalled message IDs for rendering
+              let recalledIds = [];
+              if (db) {
+                recalledIds = db.getRecalledMsgIds(myUid || "");
               }
               original_send.call(
                 window.webContents,
                 "LiteLoader.anti_recall.mainWindow.recallTipList",
-                recalledMsg
-                  .filter(
-                    (i) => i.sender == currentMsgPeer || i?.sender == null
-                  )
-                  .map((i) => i.id)
+                recalledIds.filter((id) => {
+                  // Filter to current peer context
+                  if (!currentMsgPeer) return true;
+                  const m = db ? db.getMessage(id, myUid || "") : null;
+                  return !m || m.peer_uid === currentMsgPeer;
+                }),
+                // Pass recaller info map
+                (() => {
+                  const map = {};
+                  for (const id of recalledIds) {
+                    const m = db ? db.getMessage(id, myUid || "") : null;
+                    if (m && m.recaller_name) {
+                      map[id] = m.recaller_name;
+                    }
+                  }
+                  return map;
+                })()
               );
             }
 
@@ -386,17 +361,18 @@ function onBrowserWindowCreated(window) {
                   item.cmdName != null
               )
             ) {
-              var args1 = args[1];
+              let args1 = args[1];
               if (args1 == null) return;
 
+              // Capture account UID
               if (args1.cmdName.indexOf("onProfileDetailInfoChanged") != -1) {
-                myUid = args1.payload.info.uid;
+                if (args1.payload && args1.payload.info && args1.payload.info.uid) {
+                  myUid = args1.payload.info.uid;
+                  imgDownloader.configure({ accountId: myUid });
+                  output("Account UID captured:", myUid);
+                }
               }
-              //方法一：获取个人信息的IPC，用来获取个人UID，避免防撤回自己的消息
-              // if (args1.cmdName.indexOf("onProfileDetailInfoChanged") != -1) {
-              //     myUid = args1.payload.info.uid;
-              // } else
-              //目前采用方法二，直接获取撤回消息中的参数
+
               //拦截撤回IPC
               if (
                 args1.cmdName != null &&
@@ -404,89 +380,98 @@ function onBrowserWindowCreated(window) {
                   args1.cmdName.indexOf("onActiveMsgInfoUpdate") != -1) &&
                 args1.payload != null &&
                 args1.payload.msgList instanceof Array &&
+                args1.payload.msgList.length > 0 &&
                 args1.payload.msgList[0].msgType == 5 &&
                 args1.payload.msgList[0].subMsgType == 4
               ) {
-                var msgList = args1.payload.msgList[0];
+                let msgList = args1.payload.msgList[0];
 
-                //不是自己撤回的，才拦截
                 if (
                   msgList.elements[0].grayTipElement != null &&
                   msgList.elements[0].grayTipElement.revokeElement != null &&
                   (nowConfig.isAntiRecallSelfMsg ||
-                    !msgList.elements[0].grayTipElement.revokeElement
-                      .isSelfOperate)
+                    !msgList.elements[0].grayTipElement.revokeElement.isSelfOperate)
                 ) {
-                  original_send.call(
-                    window.webContents,
-                    "LiteLoader.anti_recall.mainWindow.recallTip",
-                    msgList.msgId
-                  );
+                  // Extract recaller info
+                  const revokeEl = msgList.elements[0].grayTipElement.revokeElement;
+                  const recallerInfo = extractRecallerInfo(revokeEl);
 
-                  //如果之前存了消息
-                  var olderMsg = msgFlow.find((i) => i.id == msgList.msgId);
-                  var olderMsgFromRecalledMsg = recalledMsg.find(
-                    (i) => i.id == msgList.msgId
-                  );
-
-                  //之前存了消息，但是还没有存入专门的反撤回数组中
-                  if (olderMsg != null && olderMsgFromRecalledMsg == null) {
-                    recalledMsg.push(olderMsg);
-                    if (nowConfig.saveDb) {
-                      insertDb(olderMsg);
+                  // Mark message as recalled in database
+                  if (db) {
+                    const existingMsg = db.getMessage(msgList.msgId, myUid || "");
+                    if (existingMsg) {
+                      db.markRecalled(msgList.msgId, myUid || "", recallerInfo.uid, recallerInfo.name);
+                      await imgDownloader.downloadPic(existingMsg.msg_data);
                     }
                   }
 
-                  await imgDownloader.downloadPic(olderMsg?.msg);
-                  await imgDownloader.downloadPic(olderMsgFromRecalledMsg?.msg);
+                  original_send.call(
+                    window.webContents,
+                    "LiteLoader.anti_recall.mainWindow.recallTip",
+                    msgList.msgId,
+                    nowConfig.showRecaller ? recallerInfo.name : ""
+                  );
 
                   args[1].cmdName = "none";
                   args[1].payload.msgList.pop();
 
-                  // console.log(args1.payload);
-                  output("Detected recall, intercepted");
+                  output("Detected recall, intercepted. Recaller:", recallerInfo.name || "unknown");
                 }
               }
-              //接到消息
+              //接到消息 - 保存到数据库
               else if (
                 (args1.cmdName != null &&
                   args1.payload != null &&
                   (args1.cmdName.indexOf("onRecvMsg") != -1 ||
                     args1.cmdName.indexOf("onRecvActiveMsg") != -1) &&
                   args1.payload.msgList instanceof Array) ||
-                (args1.cmdName.indexOf("onAddSendMsg") != -1 &&
+                (args1.cmdName != null &&
+                  args1.cmdName.indexOf("onAddSendMsg") != -1 &&
+                  args1.payload != null &&
                   args1.payload.msgRecord != null) ||
-                (args1.cmdName.indexOf("onMsgInfoListUpdate") != -1 &&
+                (args1.cmdName != null &&
+                  args1.cmdName.indexOf("onMsgInfoListUpdate") != -1 &&
+                  args1.payload != null &&
                   args1.payload.msgList instanceof Array)
               ) {
-                var msgList =
+                let msgList =
                   args1.payload.msgList instanceof Array
                     ? args1.payload.msgList
                     : [args1.payload.msgRecord];
 
-                for (msg of msgList) {
-                  var msgId = msg.msgId;
+                for (let msg of msgList) {
+                  let msgId = msg.msgId;
 
-                  var olderMsgIdx = msgFlow.findIndex((i) => i.id == msgId);
-                  if (olderMsgIdx == -1) {
-                    msgFlow.push({});
-                    olderMsgIdx = msgFlow.length - 1;
-                  }
-                  msgFlow[olderMsgIdx] = {
-                    id: msgId,
-                    sender: msg.peerUid,
-                    msg: msg,
-                  };
+                  // Save to SQLite database
+                  if (db && nowConfig.saveDb) {
+                    db.insertMessage(
+                      msgId,
+                      myUid || "",
+                      msg.peerUid || "",
+                      msg.senderUid || "",
+                      msg.sendNickName || msg.sendMemberName || "",
+                      msg.chatType || 0,
+                      msg.msgTime ? msg.msgTime * 1000 : Date.now(),
+                      msg
+                    );
 
-                  if (nowConfig.maxMsgSaveLimit == null) {
-                    nowConfig.maxMsgSaveLimit = 10000;
-                  }
-                  if (nowConfig.deleteMsgCountPerTime == null) {
-                    nowConfig.deleteMsgCountPerTime = 500;
+                    // Immediately save media files
+                    if (nowConfig.saveMediaImmediately) {
+                      imgDownloader.saveMediaFiles(msg, msgId).catch((e) => {
+                        output("Save media error:", e.message);
+                      });
+                    }
                   }
 
-                  if (msgFlow.length > nowConfig.maxMsgSaveLimit) {
-                    msgFlow.splice(0, nowConfig.deleteMsgCountPerTime);
+                  // Clean up old messages periodically
+                  if (db && nowConfig.saveDb) {
+                    const stats = db.getStats(myUid || "");
+                    if (stats.totalMessages > (nowConfig.maxMsgSaveLimit || 50000)) {
+                      db.cleanOldMessages(myUid || "", nowConfig.maxMsgSaveLimit - (nowConfig.deleteMsgCountPerTime || 2000));
+                    }
+                    if (nowConfig.saveMediaImmediately && stats.totalFiles > (nowConfig.maxFileSaveLimit || 5000)) {
+                      db.cleanOldFiles(myUid || "", nowConfig.maxFileSaveLimit - (nowConfig.deleteFileCountPerTime || 500));
+                    }
                   }
                 }
               }
@@ -502,6 +487,7 @@ function onBrowserWindowCreated(window) {
 
         return original_send.call(window.webContents, channel, ...args);
       };
+
       if (window.webContents.__qqntim_original_object)
         window.webContents.__qqntim_original_object.send = patched_send;
       else window.webContents.send = patched_send;
