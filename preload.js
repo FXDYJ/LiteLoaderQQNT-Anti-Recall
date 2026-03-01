@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld("anti_recall", {
         ipcRenderer.invoke("LiteLoader.anti_recall.getAllRecalled", limit, offset),
     getPeersWithRecalls: () =>
         ipcRenderer.invoke("LiteLoader.anti_recall.getPeersWithRecalls"),
+    getLogs: () =>
+        ipcRenderer.invoke("LiteLoader.anti_recall.getLogs"),
+    getDiagnostics: () =>
+        ipcRenderer.invoke("LiteLoader.anti_recall.getDiagnostics"),
     repatchCss: (callback) =>
         ipcRenderer.on(
             "LiteLoader.anti_recall.mainWindow.repatchCss",

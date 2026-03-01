@@ -13,6 +13,7 @@ export async function onSettingWindowCreated(view) {
           <div class="ar-tab ar-tab-active" data-tab="settings">⚙️ 设置</div>
           <div class="ar-tab" data-tab="stats">📊 统计</div>
           <div class="ar-tab" data-tab="history">📋 撤回记录</div>
+          <div class="ar-tab" data-tab="logs">📝 日志</div>
         </div>
 
         <!-- Settings Tab -->
@@ -253,6 +254,38 @@ export async function onSettingWindowCreated(view) {
           </setting-section>
         </div>
 
+        <!-- Logs Tab -->
+        <div class="ar-tab-content" id="ar-tab-logs">
+          <setting-section data-title="诊断信息">
+            <setting-panel>
+              <div id="diagnosticsInfo" class="ar-diagnostics-grid"></div>
+            </setting-panel>
+          </setting-section>
+
+          <setting-section data-title="详细日志">
+            <setting-panel>
+              <div class="ar-logs-toolbar">
+                <select id="logLevelFilter" class="ar-filter-select text_color">
+                  <option value="all">全部级别</option>
+                  <option value="ERROR">仅错误</option>
+                  <option value="WARN">警告及以上</option>
+                  <option value="INFO">信息及以上</option>
+                  <option value="DEBUG">全部(含调试)</option>
+                </select>
+                <button id="logsRefresh" class="q-button q-button--small q-button--secondary">🔄 刷新</button>
+                <button id="logsCopy" class="q-button q-button--small q-button--secondary">📋 复制全部</button>
+                <label class="ar-auto-refresh-label">
+                  <input id="logsAutoRefresh" type="checkbox" /> 自动刷新
+                </label>
+              </div>
+              <div id="logsList" class="ar-logs-list">
+                <div class="ar-history-empty">点击刷新按钮加载日志</div>
+              </div>
+              <div id="logsCount" class="ar-logs-count"></div>
+            </setting-panel>
+          </setting-section>
+        </div>
+
         <style>
           .ar-tabs { display: flex; border-bottom: 2px solid rgba(127,127,127,0.2); margin-bottom: 16px; gap: 4px; }
           .ar-tab { padding: 10px 20px; cursor: pointer; border-radius: 8px 8px 0 0; font-size: 14px; font-weight: 500; color: var(--text_secondary); transition: all 0.2s ease; user-select: none; }
@@ -296,6 +329,24 @@ export async function onSettingWindowCreated(view) {
           .ar-history-meta { display: flex; gap: 12px; margin-top: 6px; font-size: 11px; color: var(--text_secondary); }
           .ar-history-pagination { display: flex; justify-content: center; align-items: center; gap: 12px; margin-top: 12px; padding: 8px 0; }
           .ar-page-info { font-size: 13px; color: var(--text_secondary); }
+          .ar-diagnostics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 8px 0; }
+          .ar-diag-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-radius: 6px; background: rgba(127,127,127,0.05); font-size: 13px; }
+          .ar-diag-label { color: var(--text_secondary); font-weight: 500; }
+          .ar-diag-value { color: var(--text_primary); font-family: monospace; word-break: break-all; max-width: 60%; text-align: right; }
+          .ar-diag-ok { color: #4caf50; }
+          .ar-diag-err { color: #f44336; }
+          .ar-logs-toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
+          .ar-auto-refresh-label { font-size: 13px; color: var(--text_secondary); display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
+          .ar-logs-list { max-height: 500px; overflow-y: auto; font-family: monospace; font-size: 12px; background: rgba(0,0,0,0.03); border-radius: 8px; padding: 8px; }
+          .ar-log-entry { padding: 4px 8px; border-radius: 4px; margin-bottom: 2px; line-height: 1.5; word-break: break-all; }
+          .ar-log-entry:hover { background: rgba(127,127,127,0.08); }
+          .ar-log-time { color: var(--text_secondary); margin-right: 8px; }
+          .ar-log-level-ERROR { color: #f44336; font-weight: 700; }
+          .ar-log-level-WARN { color: #ff9800; font-weight: 600; }
+          .ar-log-level-INFO { color: #2196f3; }
+          .ar-log-level-DEBUG { color: var(--text_secondary); }
+          .ar-log-msg { color: var(--text_primary); }
+          .ar-logs-count { text-align: center; font-size: 12px; color: var(--text_secondary); margin-top: 8px; }
           .img-hidden { display: none; }
           .path-input { align-self: normal; flex: 1; border-radius: 6px; margin-right: 16px; transition: all 100ms ease-out; border: 1px solid rgba(127,127,127,0.3); padding: 4px 8px; background: rgba(127,127,127,0.05); }
           .path-input:focus { padding-left: 8px; border-color: #ff6d6d; outline: none; }
@@ -332,6 +383,7 @@ export async function onSettingWindowCreated(view) {
       node.querySelector("#ar-tab-" + target).classList.add("ar-tab-content-active");
       if (target === "stats") loadStats(node);
       if (target === "history") loadHistory(node);
+      if (target === "logs") loadLogs(node);
     });
   });
 
@@ -487,6 +539,100 @@ export async function onSettingWindowCreated(view) {
     root.querySelector("#historyPrev").disabled = historyPage <= 1;
     root.querySelector("#historyNext").disabled = records.length < pageSize;
     root.querySelector("#historyPageInfo").textContent = "第 " + historyPage + " 页";
+  }
+
+  // Logs tab
+  var logsAutoRefreshTimer = null;
+
+  node.querySelector("#logsRefresh").onclick = () => loadLogs(node);
+  node.querySelector("#logLevelFilter").addEventListener("change", () => loadLogs(node));
+  node.querySelector("#logsCopy").onclick = async () => {
+    try {
+      var logs = await window.anti_recall.getLogs();
+      var text = logs.map(function(l) {
+        return "[" + l.time + "] [" + l.level + "] " + l.message;
+      }).join("\n");
+      var diag = await window.anti_recall.getDiagnostics();
+      var diagText = "\n--- Diagnostics ---\n" + JSON.stringify(diag, null, 2);
+      await navigator.clipboard.writeText(text + diagText);
+      node.querySelector("#logsCopy").textContent = "✅ 已复制";
+      setTimeout(() => { node.querySelector("#logsCopy").textContent = "📋 复制全部"; }, 2000);
+    } catch (e) {
+      console.log("[Anti-Recall] Copy logs error:", e);
+    }
+  };
+  node.querySelector("#logsAutoRefresh").addEventListener("change", function() {
+    if (this.checked) {
+      loadLogs(node);
+      logsAutoRefreshTimer = setInterval(() => loadLogs(node), 3000);
+    } else {
+      if (logsAutoRefreshTimer) { clearInterval(logsAutoRefreshTimer); logsAutoRefreshTimer = null; }
+    }
+  });
+
+  async function loadLogs(root) {
+    var listEl = root.querySelector("#logsList");
+    var countEl = root.querySelector("#logsCount");
+    var levelFilter = root.querySelector("#logLevelFilter").value;
+
+    // Load diagnostics
+    try {
+      var diag = await window.anti_recall.getDiagnostics();
+      var diagEl = root.querySelector("#diagnosticsInfo");
+      var diagItems = [
+        { label: "数据目录", value: diag.pluginDataDir || "-" },
+        { label: "配置文件", value: diag.configFilePath || "-" },
+        { label: "数据库路径", value: diag.dbPath || "-" },
+        { label: "数据库已初始化", value: diag.dbInitialized ? "✅ 是" : "❌ 否", ok: diag.dbInitialized },
+        { label: "数据库文件存在", value: diag.dbFileExists ? "✅ 是" : "❌ 否", ok: diag.dbFileExists },
+        { label: "数据库保存已启用", value: diag.saveDbEnabled ? "✅ 是" : "❌ 否", ok: diag.saveDbEnabled },
+        { label: "当前账号UID", value: diag.myUid || "-" },
+        { label: "日志条目数", value: String(diag.totalLogEntries || 0) },
+      ];
+      diagEl.innerHTML = diagItems.map(function(d) {
+        var valClass = "ar-diag-value";
+        if (d.ok === true) valClass += " ar-diag-ok";
+        else if (d.ok === false) valClass += " ar-diag-err";
+        return '<div class="ar-diag-item"><span class="ar-diag-label">' + escapeHtml(d.label) + '</span><span class="' + valClass + '">' + escapeHtml(d.value) + '</span></div>';
+      }).join("");
+    } catch (e) {
+      console.log("[Anti-Recall] Load diagnostics error:", e);
+    }
+
+    // Load logs
+    try {
+      var logs = await window.anti_recall.getLogs();
+      var levelPriority = { "DEBUG": 0, "INFO": 1, "WARN": 2, "ERROR": 3 };
+
+      if (levelFilter && levelFilter !== "all") {
+        var minLevel = levelPriority[levelFilter] || 0;
+        logs = logs.filter(function(l) {
+          return (levelPriority[l.level] || 0) >= minLevel;
+        });
+      }
+
+      if (!logs || logs.length === 0) {
+        listEl.innerHTML = '<div class="ar-history-empty">暂无日志</div>';
+        countEl.textContent = "";
+        return;
+      }
+
+      // Show newest first
+      var reversed = logs.slice().reverse();
+      listEl.innerHTML = reversed.map(function(l) {
+        var timeStr = l.time ? l.time.replace("T", " ").replace("Z", "").substring(0, 23) : "";
+        return '<div class="ar-log-entry">'
+          + '<span class="ar-log-time">' + escapeHtml(timeStr) + '</span>'
+          + '<span class="ar-log-level-' + escapeHtml(l.level) + '">[' + escapeHtml(l.level) + ']</span> '
+          + '<span class="ar-log-msg">' + escapeHtml(l.message) + '</span>'
+          + '</div>';
+      }).join("");
+
+      countEl.textContent = "共 " + logs.length + " 条日志";
+    } catch (e) {
+      console.log("[Anti-Recall] Load logs error:", e);
+      listEl.innerHTML = '<div class="ar-history-empty">加载日志失败: ' + escapeHtml(String(e)) + '</div>';
+    }
   }
 
   view.appendChild(node);
