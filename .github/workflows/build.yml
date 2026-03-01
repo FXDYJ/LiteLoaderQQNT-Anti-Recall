@@ -17,6 +17,9 @@ jobs:
           - os: ubuntu-latest
             platform: linux
             arch: x64
+          - os: macos-13
+            platform: darwin
+            arch: x64
           - os: macos-latest
             platform: darwin
             arch: arm64
@@ -39,7 +42,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/anti_recall
-          cp *.js dist/anti_recall/
+          cp main.js preload.js renderer.js database.js imgDownloader.js rkeyManager.js dist/anti_recall/
           cp manifest.json package.json icon.png LICENSE README.md dist/anti_recall/
           cp -r node_modules dist/anti_recall/
 
