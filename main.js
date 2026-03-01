@@ -12,6 +12,7 @@ var db = null;
 var myUid = "";
 var cleanupCounter = 0;
 const CLEANUP_INTERVAL = 100; // Only check cleanup every N messages
+const _processedRecalls = new Set(); // Dedup recall events across windows
 
 const EMPTY_STATS = { totalMessages: 0, totalRecalled: 0, totalFiles: 0, totalFileSize: 0, dbSize: 0 };
 
@@ -402,12 +403,12 @@ function onBrowserWindowCreated(window) {
                   const m = db ? db.getMessage(id, myUid || "") : null;
                   return !m || m.peer_uid === currentMsgPeer;
                 }),
-                // Pass recaller info map
+                // Pass recaller info map (skip when recaller is the sender)
                 (() => {
                   const map = {};
                   for (const id of recalledIds) {
                     const m = db ? db.getMessage(id, myUid || "") : null;
-                    if (m && m.recaller_name) {
+                    if (m && m.recaller_name && !(m.recaller_uid && m.sender_uid && m.recaller_uid === m.sender_uid)) {
                       map[id] = m.recaller_name;
                     }
                   }
@@ -460,33 +461,41 @@ function onBrowserWindowCreated(window) {
                   // Extract recaller info
                   const revokeEl = msgList.elements[0].grayTipElement.revokeElement;
                   const recallerInfo = extractRecallerInfo(revokeEl);
+                  const isSenderRecall = recallerInfo.uid && revokeEl.origMsgSenderUid && recallerInfo.uid === revokeEl.origMsgSenderUid;
 
-                  // Mark message as recalled in database
-                  if (db) {
-                    const existingMsg = db.getMessage(msgList.msgId, myUid || "");
-                    if (existingMsg) {
-                      db.markRecalled(msgList.msgId, myUid || "", recallerInfo.uid, recallerInfo.name);
-                      addLog("INFO", "Recall detected (incremental IPC). msgId:", msgList.msgId, "recaller:", recallerInfo.name || recallerInfo.uid || "unknown", "accountId:", myUid || "(empty)");
-                      await imgDownloader.downloadPic(existingMsg.msg_data);
+                  // Deduplicate: only process DB/log once per recall event
+                  if (!_processedRecalls.has(msgList.msgId)) {
+                    _processedRecalls.add(msgList.msgId);
+                    setTimeout(() => _processedRecalls.delete(msgList.msgId), 10000);
+
+                    // Mark message as recalled in database
+                    if (db) {
+                      const existingMsg = db.getMessage(msgList.msgId, myUid || "");
+                      if (existingMsg) {
+                        db.markRecalled(msgList.msgId, myUid || "", recallerInfo.uid, recallerInfo.name);
+                        addLog("INFO", "Recall detected (incremental IPC). msgId:", msgList.msgId, "recaller:", recallerInfo.name || recallerInfo.uid || "unknown", "accountId:", myUid || "(empty)");
+                        await imgDownloader.downloadPic(existingMsg.msg_data);
+                      } else {
+                        addLog("WARN", "Recall detected but message not found in DB. msgId:", msgList.msgId, "accountId:", myUid || "(empty)");
+                      }
                     } else {
-                      addLog("WARN", "Recall detected but message not found in DB. msgId:", msgList.msgId, "accountId:", myUid || "(empty)");
+                      addLog("WARN", "Recall detected but db is null. msgId:", msgList.msgId);
                     }
-                  } else {
-                    addLog("WARN", "Recall detected but db is null. msgId:", msgList.msgId);
+
+                    addLog("INFO", "Recall intercepted (incremental). Recaller:", recallerInfo.name || "unknown");
+                    output("Detected recall, intercepted. Recaller:", recallerInfo.name || "unknown");
                   }
 
+                  // Send recall tip to this window (needed per-window)
                   original_send.call(
                     window.webContents,
                     "LiteLoader.anti_recall.mainWindow.recallTip",
                     msgList.msgId,
-                    nowConfig.showRecaller ? recallerInfo.name : ""
+                    (nowConfig.showRecaller && !isSenderRecall) ? recallerInfo.name : ""
                   );
 
                   args[1].cmdName = "none";
                   args[1].payload.msgList.pop();
-
-                  addLog("INFO", "Recall intercepted (incremental). Recaller:", recallerInfo.name || "unknown");
-                  output("Detected recall, intercepted. Recaller:", recallerInfo.name || "unknown");
                 }
               }
               //接到消息 - 保存到数据库
