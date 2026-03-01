@@ -15,6 +15,26 @@ const CLEANUP_INTERVAL = 100; // Only check cleanup every N messages
 
 const EMPTY_STATS = { totalMessages: 0, totalRecalled: 0, totalFiles: 0, totalFileSize: 0, dbSize: 0 };
 
+// ---- In-memory log buffer for diagnostics ----
+const LOG_MAX_ENTRIES = 500;
+var logBuffer = [];
+
+function addLog(level, ...args) {
+  const entry = {
+    time: new Date().toISOString(),
+    level: level,
+    message: args.map(a => {
+      if (a instanceof Error) return a.stack || a.message;
+      if (typeof a === "object") { try { return JSON.stringify(a); } catch (_) { return String(a); } }
+      return String(a);
+    }).join(" "),
+  };
+  logBuffer.push(entry);
+  if (logBuffer.length > LOG_MAX_ENTRIES) {
+    logBuffer = logBuffer.slice(logBuffer.length - LOG_MAX_ENTRIES);
+  }
+}
+
 var sampleConfig = {
   mainColor: "#ff6d6d",
   saveDb: true,
@@ -42,14 +62,17 @@ function initConfig() {
 
 function loadConfig() {
   if (!fs.existsSync(configFilePath)) {
+    addLog("INFO", "Config file not found, creating default config at:", configFilePath);
     initConfig();
     return { ...sampleConfig };
   } else {
     try {
       const loaded = JSON.parse(fs.readFileSync(configFilePath, "utf-8"));
+      addLog("INFO", "Config loaded successfully from:", configFilePath);
       // Merge with defaults for any missing keys
       return { ...sampleConfig, ...loaded };
     } catch (e) {
+      addLog("ERROR", "Config parse error, using defaults:", e.message);
       output("Config parse error, using defaults:", e.message);
       return { ...sampleConfig };
     }
@@ -63,8 +86,10 @@ function saveConfig() {
 onLoad();
 
 async function onLoad() {
+  addLog("INFO", "Plugin loading... data dir:", pluginDataDir);
   if (!fs.existsSync(pluginDataDir)) {
     fs.mkdirSync(pluginDataDir, { recursive: true });
+    addLog("INFO", "Created plugin data directory:", pluginDataDir);
   }
   configFilePath = path.join(pluginDataDir, "config.json");
   nowConfig = loadConfig();
@@ -73,13 +98,18 @@ async function onLoad() {
   // Initialize SQLite database
   if (nowConfig.saveDb) {
     try {
+      addLog("INFO", "Initializing SQLite database...");
       db = new Database(pluginDataDir);
       db.open();
+      addLog("INFO", "SQLite database opened successfully. Path:", db.dbPath);
       output("SQLite database opened successfully.");
     } catch (e) {
+      addLog("ERROR", "Failed to open database:", e.stack || e.message);
       output("Failed to open database:", e.message);
       db = null;
     }
+  } else {
+    addLog("INFO", "Database saving is disabled in config (saveDb=false).");
   }
 
   // Configure image downloader for immediate file saving
@@ -171,6 +201,24 @@ async function onLoad() {
   ipcMain.handle("LiteLoader.anti_recall.getPeersWithRecalls", async () => {
     if (!db) return [];
     return db.getPeersWithRecalls(myUid || "");
+  });
+
+  ipcMain.handle("LiteLoader.anti_recall.getLogs", async () => {
+    return logBuffer.slice();
+  });
+
+  ipcMain.handle("LiteLoader.anti_recall.getDiagnostics", async () => {
+    return {
+      pluginDataDir: pluginDataDir,
+      configFilePath: configFilePath,
+      dbPath: db ? db.dbPath : path.join(pluginDataDir, "anti_recall.db"),
+      dbInitialized: !!db,
+      dbFileExists: fs.existsSync(path.join(pluginDataDir, "anti_recall.db")),
+      saveDbEnabled: nowConfig.saveDb,
+      myUid: myUid || "(not captured yet)",
+      configLoaded: Object.keys(nowConfig).length > 0,
+      totalLogEntries: logBuffer.length,
+    };
   });
 
   app.on("quit", async () => {
@@ -294,6 +342,9 @@ function onBrowserWindowCreated(window) {
                   if (db && !dbMsg.is_recalled) {
                     db.markRecalled(currMsgId, myUid || "", recallerInfo.uid, recallerInfo.name);
                   }
+                  addLog("INFO", "Recall detected (msgList). msgId:", currMsgId, "recovered from:", fromName, "recaller:", recallerInfo.name || recallerInfo.uid || "unknown");
+                } else {
+                  addLog("WARN", "Recall detected (msgList) but message not in DB. msgId:", currMsgId, "db:", db ? "initialized" : "null", "accountId:", myUid || "(empty)");
                 }
 
                 if (originalMsg != null && originalMsg instanceof Object) {
@@ -373,6 +424,7 @@ function onBrowserWindowCreated(window) {
                 if (args1.payload && args1.payload.info && args1.payload.info.uid) {
                   myUid = args1.payload.info.uid;
                   imgDownloader.configure({ accountId: myUid });
+                  addLog("INFO", "Account UID captured:", myUid);
                   output("Account UID captured:", myUid);
                 }
               }
@@ -405,8 +457,13 @@ function onBrowserWindowCreated(window) {
                     const existingMsg = db.getMessage(msgList.msgId, myUid || "");
                     if (existingMsg) {
                       db.markRecalled(msgList.msgId, myUid || "", recallerInfo.uid, recallerInfo.name);
+                      addLog("INFO", "Recall detected (incremental IPC). msgId:", msgList.msgId, "recaller:", recallerInfo.name || recallerInfo.uid || "unknown", "accountId:", myUid || "(empty)");
                       await imgDownloader.downloadPic(existingMsg.msg_data);
+                    } else {
+                      addLog("WARN", "Recall detected but message not found in DB. msgId:", msgList.msgId, "accountId:", myUid || "(empty)");
                     }
+                  } else {
+                    addLog("WARN", "Recall detected but db is null. msgId:", msgList.msgId);
                   }
 
                   original_send.call(
@@ -419,6 +476,7 @@ function onBrowserWindowCreated(window) {
                   args[1].cmdName = "none";
                   args[1].payload.msgList.pop();
 
+                  addLog("INFO", "Recall intercepted (incremental). Recaller:", recallerInfo.name || "unknown");
                   output("Detected recall, intercepted. Recaller:", recallerInfo.name || "unknown");
                 }
               }
@@ -458,10 +516,12 @@ function onBrowserWindowCreated(window) {
                       msg.msgTime ? msg.msgTime * 1000 : Date.now(),
                       msg
                     );
+                    addLog("DEBUG", "Message saved to DB. msgId:", msgId, "peer:", msg.peerUid || "", "sender:", msg.sendNickName || msg.sendMemberName || "", "accountId:", myUid || "(empty)");
 
                     // Immediately save media files
                     if (nowConfig.saveMediaImmediately) {
                       imgDownloader.saveMediaFiles(msg, msgId).catch((e) => {
+                        addLog("ERROR", "Save media error:", e.message, "msgId:", msgId);
                         output("Save media error:", e.message);
                       });
                     }
@@ -486,6 +546,7 @@ function onBrowserWindowCreated(window) {
             }
           }
         } catch (e) {
+          addLog("ERROR", "NTQQ Anti-Recall Error:", e.stack || e.message);
           output(
             "NTQQ Anti-Recall Error: ",
             e,
@@ -500,6 +561,7 @@ function onBrowserWindowCreated(window) {
         window.webContents.__qqntim_original_object.send = patched_send;
       else window.webContents.send = patched_send;
 
+      addLog("INFO", "Anti-Recall loaded for window:", window.webContents.getURL());
       output(
         "NTQQ Anti-Recall loaded for window: " + window.webContents.getURL()
       );
