@@ -105,7 +105,11 @@ class Database {
 
   getMessage(msgId, accountId) {
     try {
-      const row = this._stmtGetMsg.get(msgId, accountId);
+      let row = this._stmtGetMsg.get(msgId, accountId);
+      // Fallback: try empty accountId for messages saved before UID was captured
+      if (!row && accountId) {
+        row = this._stmtGetMsg.get(msgId, "");
+      }
       if (row) {
         row.msg_data = JSON.parse(row.msg_data);
       }
@@ -118,13 +122,23 @@ class Database {
 
   markRecalled(msgId, accountId, recallerUid, recallerName) {
     try {
-      this._stmtMarkRecalled.run(
+      const info = this._stmtMarkRecalled.run(
         Date.now(),
         recallerUid || "",
         recallerName || "",
         msgId,
         accountId
       );
+      // Fallback: try empty accountId if no rows updated
+      if (info.changes === 0 && accountId) {
+        this._stmtMarkRecalled.run(
+          Date.now(),
+          recallerUid || "",
+          recallerName || "",
+          msgId,
+          ""
+        );
+      }
     } catch (e) {
       this._output("Mark recalled error:", e.message);
     }
@@ -368,6 +382,15 @@ class Database {
     }
   }
 
+  migrateAccountId(oldId, newId) {
+    try {
+      this.db.prepare("UPDATE messages SET account_id = ? WHERE account_id = ?").run(newId, oldId);
+      this.db.prepare("UPDATE saved_files SET account_id = ? WHERE account_id = ?").run(newId, oldId);
+    } catch (e) {
+      this._output("Migrate account error:", e.message);
+    }
+  }
+
   close() {
     if (this.db) {
       try {
@@ -385,7 +408,7 @@ class Database {
 /**
  * In-memory fallback database used when better-sqlite3 is unavailable.
  * Implements the same interface as Database but stores data in Maps.
- * Data is lost on restart but keeps core anti-recall working.
+ * Data is persisted to a JSON file so it survives restarts.
  */
 class MemoryDatabase {
   constructor(dataDir) {
@@ -394,9 +417,13 @@ class MemoryDatabase {
     this._messages = new Map(); // key: `${msgId}|${accountId}`
     this._files = [];
     this._isMemory = true;
+    this._persistPath = null;
+    this._saveTimer = null;
   }
 
   open() {
+    this._persistPath = path.join(this.dataDir, "anti_recall_memory.json");
+    this._loadFromFile();
     return this;
   }
 
@@ -422,6 +449,7 @@ class MemoryDatabase {
         recaller_name: "",
         created_at: Date.now(),
       });
+      this._scheduleSave();
     } catch (e) {
       this._output("Insert message error:", e.message);
     }
@@ -429,7 +457,11 @@ class MemoryDatabase {
 
   getMessage(msgId, accountId) {
     try {
-      const row = this._messages.get(this._key(msgId, accountId));
+      let row = this._messages.get(this._key(msgId, accountId));
+      // Fallback: try empty accountId for messages saved before UID was captured
+      if (!row && accountId) {
+        row = this._messages.get(this._key(msgId, ""));
+      }
       if (!row) return null;
       const copy = { ...row };
       if (typeof copy.msg_data === "object" && copy.msg_data !== null) {
@@ -444,12 +476,17 @@ class MemoryDatabase {
 
   markRecalled(msgId, accountId, recallerUid, recallerName) {
     try {
-      const row = this._messages.get(this._key(msgId, accountId));
+      let row = this._messages.get(this._key(msgId, accountId));
+      // Fallback: try empty accountId
+      if (!row && accountId) {
+        row = this._messages.get(this._key(msgId, ""));
+      }
       if (row) {
         row.is_recalled = 1;
         row.recall_time = Date.now();
         row.recaller_uid = recallerUid || "";
         row.recaller_name = recallerName || "";
+        this._scheduleSave();
       }
     } catch (e) {
       this._output("Mark recalled error:", e.message);
@@ -569,6 +606,7 @@ class MemoryDatabase {
         saved_path: savedPath || "",
         created_at: Date.now(),
       });
+      this._scheduleSave();
     } catch (e) {
       this._output("Insert file error:", e.message);
     }
@@ -616,6 +654,7 @@ class MemoryDatabase {
       for (const e of toRemove) {
         this._messages.delete(e.key);
       }
+      if (toRemove.length > 0) this._scheduleSave();
     } catch (e) {
       this._output("Clean old messages error:", e.message);
     }
@@ -636,6 +675,7 @@ class MemoryDatabase {
         }
       }
       this._files = this._files.filter((_, i) => !removeIndices.has(i));
+      if (toRemove.length > 0) this._scheduleSave();
     } catch (e) {
       this._output("Clean old files error:", e.message);
     }
@@ -660,14 +700,87 @@ class MemoryDatabase {
         }
       }
       this._files = remaining;
+      this._scheduleSave();
     } catch (e) {
       this._output("Clear all error:", e.message);
     }
   }
 
+  migrateAccountId(oldId, newId) {
+    try {
+      const toMigrate = [];
+      for (const [key, row] of this._messages.entries()) {
+        if (row.account_id === oldId) {
+          toMigrate.push([key, row]);
+        }
+      }
+      for (const [oldKey, row] of toMigrate) {
+        this._messages.delete(oldKey);
+        row.account_id = newId;
+        const newKey = this._key(row.msg_id, newId);
+        this._messages.set(newKey, row);
+      }
+      for (const f of this._files) {
+        if (f.account_id === oldId) {
+          f.account_id = newId;
+        }
+      }
+      if (toMigrate.length > 0) this._scheduleSave();
+    } catch (e) {
+      this._output("Migrate account error:", e.message);
+    }
+  }
+
   close() {
+    this._saveToFile();
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
     this._messages.clear();
     this._files = [];
+  }
+
+  // ---- Persistence helpers ----
+
+  _loadFromFile() {
+    try {
+      if (!this._persistPath || !fs.existsSync(this._persistPath)) return;
+      const raw = fs.readFileSync(this._persistPath, "utf-8");
+      const data = JSON.parse(raw);
+      if (data.messages && typeof data.messages === "object") {
+        for (const [key, value] of Object.entries(data.messages)) {
+          this._messages.set(key, value);
+        }
+      }
+      if (Array.isArray(data.files)) {
+        this._files = data.files;
+      }
+      this._output("Loaded", this._messages.size, "messages from persistence file.");
+    } catch (e) {
+      this._output("Load from file error:", e.message);
+    }
+  }
+
+  _saveToFile() {
+    try {
+      if (!this._persistPath) return;
+      const data = {
+        messages: Object.fromEntries(this._messages),
+        files: this._files,
+      };
+      fs.writeFileSync(this._persistPath, JSON.stringify(data), "utf-8");
+    } catch (e) {
+      this._output("Save to file error:", e.message);
+    }
+  }
+
+  _scheduleSave() {
+    if (this._saveTimer) clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => {
+      this._saveToFile();
+      this._saveTimer = null;
+    }, 2000);
   }
 
   _output(...args) {

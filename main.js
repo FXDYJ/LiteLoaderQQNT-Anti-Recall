@@ -224,6 +224,8 @@ async function onLoad() {
       dbInitialized: !!db,
       dbIsMemoryFallback: db ? !!db._isMemory : false,
       dbFileExists: fs.existsSync(path.join(pluginDataDir, "anti_recall.db")),
+      memoryPersistFile: db && db._isMemory && db._persistPath ? db._persistPath : null,
+      memoryPersistExists: db && db._isMemory && db._persistPath ? fs.existsSync(db._persistPath) : false,
       saveDbEnabled: nowConfig.saveDb,
       myUid: myUid || "(not captured yet)",
       configLoaded: Object.keys(nowConfig).length > 0,
@@ -432,10 +434,16 @@ function onBrowserWindowCreated(window) {
               // Capture account UID
               if (args1.cmdName.indexOf("onProfileDetailInfoChanged") != -1) {
                 if (args1.payload && args1.payload.info && args1.payload.info.uid) {
+                  const previousUid = myUid;
                   myUid = args1.payload.info.uid;
                   imgDownloader.configure({ accountId: myUid });
                   addLog("INFO", "Account UID captured:", myUid);
                   output("Account UID captured:", myUid);
+                  // Migrate messages saved with empty accountId to real UID
+                  if (!previousUid && myUid && db) {
+                    db.migrateAccountId("", myUid);
+                    addLog("INFO", "Migrated messages from empty accountId to:", myUid);
+                  }
                 }
               }
 
