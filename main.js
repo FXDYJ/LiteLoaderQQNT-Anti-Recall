@@ -2,7 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { app, ipcMain, dialog } = require("electron");
 const { ImgDownloader } = require("./imgDownloader.js");
-const { Database } = require("./database.js");
+const { Database, MemoryDatabase } = require("./database.js");
 
 var configFilePath = "";
 var pluginDataDir = path.join(LiteLoader.path.data, "anti_recall");
@@ -104,9 +104,17 @@ async function onLoad() {
       addLog("INFO", "SQLite database opened successfully. Path:", db.dbPath);
       output("SQLite database opened successfully.");
     } catch (e) {
-      addLog("ERROR", "Failed to open database:", e.stack || e.message);
-      output("Failed to open database:", e.message);
-      db = null;
+      addLog("ERROR", "Failed to open SQLite database:", e.stack || e.message);
+      addLog("WARN", "Falling back to in-memory database. Anti-recall will work but stored messages will be lost on restart.");
+      output("SQLite unavailable, using in-memory fallback. Anti-recall still works.");
+      try {
+        db = new MemoryDatabase(pluginDataDir);
+        db.open();
+        addLog("INFO", "In-memory fallback database initialized successfully.");
+      } catch (e2) {
+        addLog("ERROR", "Failed to initialize in-memory fallback:", e2.stack || e2.message);
+        db = null;
+      }
     }
   } else {
     addLog("INFO", "Database saving is disabled in config (saveDb=false).");
@@ -213,6 +221,7 @@ async function onLoad() {
       configFilePath: configFilePath,
       dbPath: db ? db.dbPath : path.join(pluginDataDir, "anti_recall.db"),
       dbInitialized: !!db,
+      dbIsMemoryFallback: db ? !!db._isMemory : false,
       dbFileExists: fs.existsSync(path.join(pluginDataDir, "anti_recall.db")),
       saveDbEnabled: nowConfig.saveDb,
       myUid: myUid || "(not captured yet)",

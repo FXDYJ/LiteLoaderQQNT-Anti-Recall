@@ -382,4 +382,298 @@ class Database {
   }
 }
 
+/**
+ * In-memory fallback database used when better-sqlite3 is unavailable.
+ * Implements the same interface as Database but stores data in Maps.
+ * Data is lost on restart but keeps core anti-recall working.
+ */
+class MemoryDatabase {
+  constructor(dataDir) {
+    this.dataDir = dataDir;
+    this.dbPath = path.join(dataDir, "anti_recall.db");
+    this._messages = new Map(); // key: `${msgId}|${accountId}`
+    this._files = [];
+    this._isMemory = true;
+  }
+
+  open() {
+    return this;
+  }
+
+  _key(msgId, accountId) {
+    return msgId + "|" + (accountId || "");
+  }
+
+  insertMessage(msgId, accountId, peerUid, senderUid, senderName, chatType, msgTime, msgData) {
+    try {
+      const key = this._key(msgId, accountId);
+      this._messages.set(key, {
+        msg_id: msgId,
+        account_id: accountId || "",
+        peer_uid: peerUid || "",
+        sender_uid: senderUid || "",
+        sender_name: senderName || "",
+        chat_type: chatType || 0,
+        msg_time: msgTime || 0,
+        msg_data: typeof msgData === "object" ? JSON.parse(JSON.stringify(msgData)) : msgData,
+        is_recalled: 0,
+        recall_time: 0,
+        recaller_uid: "",
+        recaller_name: "",
+        created_at: Date.now(),
+      });
+    } catch (e) {
+      this._output("Insert message error:", e.message);
+    }
+  }
+
+  getMessage(msgId, accountId) {
+    try {
+      const row = this._messages.get(this._key(msgId, accountId));
+      if (!row) return null;
+      const copy = { ...row };
+      if (typeof copy.msg_data === "object" && copy.msg_data !== null) {
+        copy.msg_data = JSON.parse(JSON.stringify(copy.msg_data));
+      }
+      return copy;
+    } catch (e) {
+      this._output("Get message error:", e.message);
+      return null;
+    }
+  }
+
+  markRecalled(msgId, accountId, recallerUid, recallerName) {
+    try {
+      const row = this._messages.get(this._key(msgId, accountId));
+      if (row) {
+        row.is_recalled = 1;
+        row.recall_time = Date.now();
+        row.recaller_uid = recallerUid || "";
+        row.recaller_name = recallerName || "";
+      }
+    } catch (e) {
+      this._output("Mark recalled error:", e.message);
+    }
+  }
+
+  getRecalledMsgIds(accountId) {
+    try {
+      const ids = [];
+      for (const row of this._messages.values()) {
+        if (row.account_id === accountId && row.is_recalled === 1) {
+          ids.push(row.msg_id);
+        }
+      }
+      return ids;
+    } catch (e) {
+      this._output("Get recalled msg ids error:", e.message);
+      return [];
+    }
+  }
+
+  getRecalledByPeer(peerUid, accountId, limit = 50, offset = 0) {
+    try {
+      const rows = [];
+      for (const row of this._messages.values()) {
+        if (row.peer_uid === peerUid && row.account_id === accountId && row.is_recalled === 1) {
+          rows.push({ ...row });
+        }
+      }
+      rows.sort((a, b) => b.recall_time - a.recall_time);
+      return rows.slice(offset, offset + limit);
+    } catch (e) {
+      this._output("Get recalled by peer error:", e.message);
+      return [];
+    }
+  }
+
+  searchRecalled(accountId, keyword, limit = 50, offset = 0) {
+    try {
+      const rows = [];
+      const kw = (keyword || "").toLowerCase();
+      for (const row of this._messages.values()) {
+        if (row.account_id === accountId && row.is_recalled === 1) {
+          const dataStr = typeof row.msg_data === "object" ? JSON.stringify(row.msg_data) : String(row.msg_data);
+          if (dataStr.toLowerCase().includes(kw)) {
+            rows.push({ ...row });
+          }
+        }
+      }
+      rows.sort((a, b) => b.recall_time - a.recall_time);
+      return rows.slice(offset, offset + limit);
+    } catch (e) {
+      this._output("Search recalled error:", e.message);
+      return [];
+    }
+  }
+
+  getAllRecalled(accountId, limit = 50, offset = 0) {
+    try {
+      const rows = [];
+      for (const row of this._messages.values()) {
+        if (row.account_id === accountId && row.is_recalled === 1) {
+          rows.push({ ...row });
+        }
+      }
+      rows.sort((a, b) => b.recall_time - a.recall_time);
+      return rows.slice(offset, offset + limit);
+    } catch (e) {
+      this._output("Get all recalled error:", e.message);
+      return [];
+    }
+  }
+
+  getPeersWithRecalls(accountId) {
+    try {
+      const peerMap = new Map();
+      for (const row of this._messages.values()) {
+        if (row.account_id === accountId && row.is_recalled === 1) {
+          const existing = peerMap.get(row.peer_uid);
+          if (existing) {
+            existing.recall_count++;
+            if (row.recall_time > existing._max_recall_time) {
+              existing._max_recall_time = row.recall_time;
+              existing.sender_name = row.sender_name;
+            }
+          } else {
+            peerMap.set(row.peer_uid, {
+              peer_uid: row.peer_uid,
+              sender_name: row.sender_name,
+              chat_type: row.chat_type,
+              recall_count: 1,
+              _max_recall_time: row.recall_time,
+            });
+          }
+        }
+      }
+      const result = Array.from(peerMap.values());
+      result.sort((a, b) => b._max_recall_time - a._max_recall_time);
+      for (const r of result) delete r._max_recall_time;
+      return result;
+    } catch (e) {
+      this._output("Get peers error:", e.message);
+      return [];
+    }
+  }
+
+  insertFile(msgId, accountId, elementId, fileType, fileName, fileSize, originalPath, savedPath) {
+    try {
+      this._files.push({
+        msg_id: msgId,
+        account_id: accountId || "",
+        element_id: elementId || "",
+        file_type: fileType || "",
+        file_name: fileName || "",
+        file_size: fileSize || 0,
+        original_path: originalPath || "",
+        saved_path: savedPath || "",
+        created_at: Date.now(),
+      });
+    } catch (e) {
+      this._output("Insert file error:", e.message);
+    }
+  }
+
+  getStats(accountId) {
+    try {
+      let totalMessages = 0;
+      let totalRecalled = 0;
+      for (const row of this._messages.values()) {
+        if (row.account_id === accountId) {
+          totalMessages++;
+          if (row.is_recalled === 1) totalRecalled++;
+        }
+      }
+      let totalFiles = 0;
+      let totalFileSize = 0;
+      for (const f of this._files) {
+        if (f.account_id === accountId) {
+          totalFiles++;
+          totalFileSize += f.file_size || 0;
+        }
+      }
+      return { totalMessages, totalRecalled, totalFiles, totalFileSize, dbSize: 0 };
+    } catch (e) {
+      this._output("Get stats error:", e.message);
+      return { totalMessages: 0, totalRecalled: 0, totalFiles: 0, totalFileSize: 0, dbSize: 0 };
+    }
+  }
+
+  getDetailedStats(accountId) {
+    return this.getStats(accountId);
+  }
+
+  cleanOldMessages(accountId, keepCount) {
+    try {
+      const entries = [];
+      for (const [key, row] of this._messages.entries()) {
+        if (row.account_id === accountId && row.is_recalled === 0) {
+          entries.push({ key, created_at: row.created_at });
+        }
+      }
+      entries.sort((a, b) => b.created_at - a.created_at);
+      const toRemove = entries.slice(keepCount);
+      for (const e of toRemove) {
+        this._messages.delete(e.key);
+      }
+    } catch (e) {
+      this._output("Clean old messages error:", e.message);
+    }
+  }
+
+  cleanOldFiles(accountId, keepCount) {
+    try {
+      const matching = this._files
+        .map((f, i) => ({ ...f, _idx: i }))
+        .filter((f) => f.account_id === accountId);
+      matching.sort((a, b) => b.created_at - a.created_at);
+      const toRemove = matching.slice(keepCount);
+      const removeIndices = new Set(toRemove.map((r) => r._idx));
+
+      for (const r of toRemove) {
+        if (r.saved_path && fs.existsSync(r.saved_path)) {
+          try { fs.unlinkSync(r.saved_path); } catch (_) {}
+        }
+      }
+      this._files = this._files.filter((_, i) => !removeIndices.has(i));
+    } catch (e) {
+      this._output("Clean old files error:", e.message);
+    }
+  }
+
+  clearAll(accountId) {
+    try {
+      for (const [key, row] of this._messages.entries()) {
+        if (row.account_id === accountId) {
+          this._messages.delete(key);
+        }
+      }
+
+      const remaining = [];
+      for (const f of this._files) {
+        if (f.account_id === accountId) {
+          if (f.saved_path && fs.existsSync(f.saved_path)) {
+            try { fs.unlinkSync(f.saved_path); } catch (_) {}
+          }
+        } else {
+          remaining.push(f);
+        }
+      }
+      this._files = remaining;
+    } catch (e) {
+      this._output("Clear all error:", e.message);
+    }
+  }
+
+  close() {
+    this._messages.clear();
+    this._files = [];
+  }
+
+  _output(...args) {
+    console.log("\x1b[32m%s\x1b[0m", "Anti-Recall MemDB:", ...args);
+  }
+}
+
 module.exports.Database = Database;
+module.exports.MemoryDatabase = MemoryDatabase;
