@@ -8,7 +8,23 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win32
+            arch: x64
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+          - os: macos-13
+            platform: darwin
+            arch: x64
+          - os: macos-latest
+            platform: darwin
+            arch: arm64
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout repository
@@ -23,16 +39,24 @@ jobs:
         run: npm install --omit=dev
 
       - name: Package plugin
+        shell: bash
         run: |
           mkdir -p dist/anti_recall
-          rsync -a --exclude='.git' --exclude='.github' --exclude='dist' \
-            --exclude='*.db' --exclude='*.db-journal' --exclude='*.db-wal' --exclude='*.db-shm' \
-            . dist/anti_recall/
-          cd dist
-          zip -r ../qq-anti-recall.zip anti_recall
+          cp main.js preload.js renderer.js database.js imgDownloader.js rkeyManager.js dist/anti_recall/
+          cp manifest.json package.json icon.png LICENSE README.md dist/anti_recall/
+          cp -r node_modules dist/anti_recall/
+
+      - name: Create archive (Unix)
+        if: runner.os != 'Windows'
+        run: cd dist && zip -r ../qq-anti-recall-${{ matrix.platform }}-${{ matrix.arch }}.zip anti_recall
+
+      - name: Create archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist\anti_recall -DestinationPath qq-anti-recall-${{ matrix.platform }}-${{ matrix.arch }}.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: qq-anti-recall
-          path: qq-anti-recall.zip
+          name: qq-anti-recall-${{ matrix.platform }}-${{ matrix.arch }}
+          path: qq-anti-recall-${{ matrix.platform }}-${{ matrix.arch }}.zip

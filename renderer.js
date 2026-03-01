@@ -584,6 +584,7 @@ export async function onSettingWindowCreated(view) {
         { label: "配置文件", value: diag.configFilePath || "-" },
         { label: "数据库路径", value: diag.dbPath || "-" },
         { label: "数据库已初始化", value: diag.dbInitialized ? "✅ 是" : "❌ 否", ok: diag.dbInitialized },
+        { label: "数据库模式", value: diag.dbIsMemoryFallback ? "⚠️ 内存模式（重启后数据丢失）" : (diag.dbInitialized ? "SQLite" : "-"), ok: diag.dbInitialized && !diag.dbIsMemoryFallback },
         { label: "数据库文件存在", value: diag.dbFileExists ? "✅ 是" : "❌ 否", ok: diag.dbFileExists },
         { label: "数据库保存已启用", value: diag.saveDbEnabled ? "✅ 是" : "❌ 否", ok: diag.saveDbEnabled },
         { label: "当前账号UID", value: diag.myUid || "-" },
