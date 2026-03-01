@@ -2,6 +2,11 @@ name: Build Plugin
 
 on:
   workflow_dispatch:
+    inputs:
+      electron_version:
+        description: 'Electron version for native module rebuild (should match QQNT Electron version)'
+        required: false
+        default: '31.2.1'
 
 permissions:
   contents: read
@@ -17,7 +22,7 @@ jobs:
           - os: ubuntu-latest
             platform: linux
             arch: x64
-          - os: macos-13
+          - os: macos-14
             platform: darwin
             arch: x64
           - os: macos-latest
@@ -37,6 +42,11 @@ jobs:
 
       - name: Install production dependencies
         run: npm install --omit=dev
+        env:
+          npm_config_arch: ${{ matrix.arch }}
+
+      - name: Rebuild native modules for Electron
+        run: npx @electron/rebuild -w better-sqlite3 -v ${{ inputs.electron_version || '31.2.1' }} --arch=${{ matrix.arch }}
 
       - name: Package plugin
         shell: bash
@@ -46,17 +56,8 @@ jobs:
           cp manifest.json package.json icon.png LICENSE README.md dist/anti_recall/
           cp -r node_modules dist/anti_recall/
 
-      - name: Create archive (Unix)
-        if: runner.os != 'Windows'
-        run: cd dist && zip -r ../qq-anti-recall-${{ matrix.platform }}-${{ matrix.arch }}.zip anti_recall
-
-      - name: Create archive (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Compress-Archive -Path dist\anti_recall -DestinationPath qq-anti-recall-${{ matrix.platform }}-${{ matrix.arch }}.zip
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: qq-anti-recall-${{ matrix.platform }}-${{ matrix.arch }}
-          path: qq-anti-recall-${{ matrix.platform }}-${{ matrix.arch }}.zip
+          path: dist/anti_recall
